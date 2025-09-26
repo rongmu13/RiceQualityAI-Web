@@ -5,6 +5,7 @@ import pandas as pd
 import cv2
 from skimage import measure, segmentation, feature
 
+# scikit-learn 可选（没有也能跑）
 try:
     from sklearn.linear_model import LogisticRegression
     SKLEARN_OK = True
@@ -15,7 +16,11 @@ except Exception:
 st.set_page_config(page_title="米品質判定AI", layout="wide")
 st.title("米品質判定AI")
 
-# ---------------- サイドバー ----------------
+# 固定显示宽度（你可改数字微调）
+W_COL = 360   # 三列下的图宽
+W_TGT = 360   # 判定结果图宽（同列）
+
+# -------- サイドバー --------
 with st.sidebar:
     st.markdown("### 調整 → 学習 → 判定")
     bg_bright = st.checkbox("背景は明るい（白背景）", value=False)
@@ -24,17 +29,15 @@ with st.sidebar:
     peak_gap  = st.slider("ピーク間隔（px）", 2, 20, 6)
     min_area  = st.slider("最小粒面積（px）", 20, 600, 80, step=10)
     max_area  = st.slider("最大粒面積（px）", 300, 8000, 3000, step=50)
-    open_iter = st.slider("分離の強さ", 0, 3, 1)
+    open_iter = st.slider("分離の強さ（開演算反復）", 0, 3, 1)
     st.markdown("---")
-    use_ml = st.checkbox(
-        "軽量ML（ロジスティック回帰）を使う",
-        value=False, disabled=not SKLEARN_OK,
-        help=None if SKLEARN_OK else "クラウド環境に scikit-learn が無いのでオフのまま使ってください"
-    )
+    use_ml = st.checkbox("軽量ML（ロジスティック回帰）を使う",
+                         value=False, disabled=not SKLEARN_OK,
+                         help=None if SKLEARN_OK else "scikit-learnが無い環境なのでオフのまま使ってください")
     learn_btn = st.button("① 学習")
     judge_btn = st.button("② 判定")
 
-# ---------------- アップローダ ----------------
+# -------- 三列のアップローダ --------
 c1, c2, c3 = st.columns(3)
 with c1:
     st.subheader("① 健康粒（参照）")
@@ -46,79 +49,65 @@ with c3:
     st.subheader("③ 判定対象")
     target_file = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"], key="target")
 
-
+# -------- 共通関数（JS→Python移植） --------
 def read_bgr(uploaded):
     data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
-    img  = cv2.imdecode(data, cv2.IMREAD_COLOR)
-    return img
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 def preprocess(img_bgr, bg_bright, th_offset, peak_min, peak_gap, min_area, max_area, open_iter):
-    
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     gray = cv2.GaussianBlur(gray, (3,3), 0)
 
-    # Otsu（ret が数値）
     ret, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     thr = int(np.clip(ret + th_offset, 0, 255))
     mode = cv2.THRESH_BINARY_INV if bg_bright else cv2.THRESH_BINARY
     _, bw = cv2.threshold(gray, thr, 255, mode)
     bw = (bw > 0).astype(np.uint8)
 
-    # 開演算
     k3 = np.ones((3,3), np.uint8)
     if open_iter > 0:
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k3, iterations=int(open_iter))
     else:
         bw = cv2.erode(bw, k3, 1); bw = cv2.dilate(bw, k3, 2); bw = cv2.erode(bw, k3, 1)
 
-    # 距離変換 & 局所ピーク
     dist = cv2.distanceTransform(bw, cv2.DIST_L2, 5)
     peaks = feature.peak_local_max(dist, min_distance=max(1,int(peak_gap)),
                                    threshold_abs=float(peak_min), labels=bw)
     if len(peaks) < 3:
-        # 兜底：緩める
         peaks = feature.peak_local_max(dist, min_distance=max(1,int(max(1,peak_gap//2))), labels=bw)
 
-    # 分水嶺（ピーク無なら連通成分）
     markers = np.zeros_like(bw, np.int32)
-    for i,(y,x) in enumerate(peaks,1):
-        markers[y,x] = i
+    for i,(y,x) in enumerate(peaks,1): markers[y,x] = i
     if markers.max() == 0:
         labels = measure.label(bw, connectivity=2)
     else:
         labels = segmentation.watershed(-dist, markers=markers, mask=bw)
 
-    # 面積フィルタ
     comps = []
     for p in measure.regionprops(labels):
         a = int(p.area)
-        if a < min_area or a > max_area: 
-            continue
+        if a < min_area or a > max_area: continue
         minr, minc, maxr, maxc = p.bbox
         comps.append({"area": a, "bbox": (int(minc), int(minr), int(maxc), int(maxr)), "coords": p.coords})
     return bw*255, comps
 
 def whiteness_score(img_bgr, comp):
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-    s = hsv[:,:,1] / 255.0
-    v = hsv[:,:,2] / 255.0
+    s = hsv[:,:,1]/255.0; v = hsv[:,:,2]/255.0
     yy, xx = comp["coords"][:,0], comp["coords"][:,1]
-    vals = v[yy, xx] - 0.7 * s[yy, xx]
+    vals = v[yy,xx] - 0.7*s[yy,xx]
     return float(vals.mean()) if vals.size else 0.0
 
 def draw_boxes(img_bgr, comps, flags=None):
     out = img_bgr.copy()
     for i,c in enumerate(comps):
         x1,y1,x2,y2 = c["bbox"]
-        if flags is None:
-            col = (106,161,255)          # blue
-        else:
-            col = (91,91,255) if flags[i] else (53,211,57)  # red/green
+        col = (106,161,255) if flags is None else ((91,91,255) if flags[i] else (53,211,57))
         cv2.rectangle(out, (x1,y1), (x2,y2), col, 2, cv2.LINE_AA)
     return out
 
-# ---------------- 画像の読み込み＆前処理 ----------------
+# -------- 画像の読み込み & 分割 --------
 h_img = w_img = t_img = None
 h_comps = w_comps = t_comps = []
 
@@ -134,44 +123,37 @@ if target_file:
     t_img = read_bgr(target_file)
     _, t_comps = preprocess(t_img, bg_bright, th_offset, peak_min, peak_gap, min_area, max_area, open_iter)
 
-# ---------------- 可視化（ここだけで表示；サイズ固定） ----------------
-viz_h = cv2.cvtColor(draw_boxes(h_img, h_comps), cv2.COLOR_BGR2RGB) if h_img is not None else None
-viz_w = cv2.cvtColor(draw_boxes(w_img, w_comps), cv2.COLOR_BGR2RGB) if w_img is not None else None
-viz_t = cv2.cvtColor(draw_boxes(t_img, t_comps), cv2.COLOR_BGR2RGB) if t_img is not None else None
+# -------- 各アップローダの真下に表示（同じ列） --------
+with c1:
+    if h_img is not None:
+        st.image(cv2.cvtColor(draw_boxes(h_img, h_comps), cv2.COLOR_BGR2RGB),
+                 caption=f"健康粒：{len(h_comps)} 粒", width=W_COL)
 
-row_left, row_right = st.columns(2)
-with row_left:
-    if viz_h is not None:
-        st.image(viz_h, caption=f"健康粒：{len(h_comps)} 粒", width=400)
-with row_right:
-    if viz_w is not None:
-        st.image(viz_w, caption=f"白未熟：{len(w_comps)} 粒", width=400)
+with c2:
+    if w_img is not None:
+        st.image(cv2.cvtColor(draw_boxes(w_img, w_comps), cv2.COLOR_BGR2RGB),
+                 caption=f"白未熟：{len(w_comps)} 粒", width=W_COL)
 
-if viz_t is not None:
-    st.image(viz_t, caption=f"判定対象：{len(t_comps)} 粒", width=600)
+with c3:
+    if t_img is not None:
+        st.image(cv2.cvtColor(draw_boxes(t_img, t_comps), cv2.COLOR_BGR2RGB),
+                 caption=f"判定対象：{len(t_comps)} 粒（判定前）", width=W_COL)
 
-# ---------------- 学習（しきい値 + 任意の軽量ML） ----------------
+# -------- 学習 --------
 def learn_threshold(h_img, h_comps, w_img, w_comps):
-    if not h_comps or not w_comps:
-        return None
+    if not h_comps or not w_comps: return None
     hs = [whiteness_score(h_img, c) for c in h_comps]
     ws = [whiteness_score(w_img, c) for c in w_comps]
     return float((np.median(hs) + np.median(ws)) / 2.0)
 
 def learn_ml(h_img, h_comps, w_img, w_comps):
-    if (not SKLEARN_OK) or (LogisticRegression is None):
-        return None
-    if not h_comps or not w_comps:
-        return None
+    if (not SKLEARN_OK) or (LogisticRegression is None): return None
+    if not h_comps or not w_comps: return None
     X, y = [], []
-    for c in h_comps:
-        X.append([whiteness_score(h_img, c), float(c["area"])]); y.append(0)
-    for c in w_comps:
-        X.append([whiteness_score(w_img, c), float(c["area"])]); y.append(1)
-    if len(X) < 10:
-        return None
-    clf = LogisticRegression(max_iter=1000)
-    clf.fit(np.array(X), np.array(y))
+    for c in h_comps: X.append([whiteness_score(h_img, c), float(c["area"])]); y.append(0)
+    for c in w_comps: X.append([whiteness_score(w_img, c), float(c["area"])]); y.append(1)
+    if len(X) < 10: return None
+    clf = LogisticRegression(max_iter=1000).fit(np.array(X), np.array(y))
     return clf
 
 if learn_btn:
@@ -180,24 +162,22 @@ if learn_btn:
     else:
         th = learn_threshold(h_img, h_comps, w_img, w_comps)
         if th is None:
-            st.warning("参照画像から有効な粒を検出できませんでした。パラメータを調整して『一枠一粒』にしてください。")
+            st.warning("参照画像から有効な粒を検出できませんでした。『一枠一粒』に調整してください。")
         else:
             st.session_state["threshold"] = th
             msg = f"学習完了：しきい値 = {th:.4f}"
             if use_ml and SKLEARN_OK:
                 clf = learn_ml(h_img, h_comps, w_img, w_comps)
                 if clf is not None:
-                    st.session_state["clf"] = clf
-                    msg += " ｜ ML=有効（ロジスティック回帰）"
+                    st.session_state["clf"] = clf; msg += " ｜ ML=有効"
                 else:
-                    st.session_state.pop("clf", None)
-                    msg += " ｜ ML=無効（参照粒が少なすぎ）"
+                    st.session_state.pop("clf", None); msg += " ｜ ML=無効（参照粒が少ない）"
             st.success(msg)
 
-# ---------------- 判定 ----------------
+# -------- 判定（結果も第3列の下に表示） --------
 if judge_btn:
     if t_img is None or not t_comps:
-        st.warning("③判定対象 をアップロードし、『一枠一粒』になるよう調整してください。")
+        st.warning("③判定対象 をアップロードし、『一枠一粒』に調整してください。")
     elif "threshold" not in st.session_state:
         st.warning("先に ①学習 を実行してください。")
     else:
@@ -212,14 +192,14 @@ if judge_btn:
         else:
             is_white = np.array([s >= th for s in scores])
 
-        total = len(is_white)
-        n_white = int(np.sum(is_white))
+        total = len(is_white); n_white = int(np.sum(is_white))
         rate = (100.0 * n_white / total) if total else 0.0
 
         vis = cv2.cvtColor(draw_boxes(t_img, t_comps, flags=is_white.tolist()), cv2.COLOR_BGR2RGB)
-        st.image(vis, caption=f"結果：総数 {total}｜白未熟 {n_white}｜割合 {rate:.1f}%"
-                              + (" ｜ ML使用" if clf is not None else " ｜ しきい値使用"),
-                 width=600)
+        with c3:
+            st.image(vis, caption=f"結果：総数 {total}｜白未熟 {n_white}｜割合 {rate:.1f}%"
+                                  + (" ｜ ML使用" if clf is not None else " ｜ しきい値使用"),
+                     width=W_TGT)
 
         df = pd.DataFrame({
             "id": np.arange(1, total+1, dtype=int),
@@ -232,7 +212,6 @@ if judge_btn:
                            data=df.to_csv(index=False).encode("utf-8-sig"),
                            file_name="result.csv", mime="text/csv")
 
-# ---------------- 初期ヘルプ ----------------
+# 初期ヘルプ
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
-
