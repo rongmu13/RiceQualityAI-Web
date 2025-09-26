@@ -5,7 +5,6 @@ import pandas as pd
 import cv2
 from skimage import measure, segmentation, feature
 
-# --- scikit-learn 是可选：没有也能跑 ---
 try:
     from sklearn.linear_model import LogisticRegression
     SKLEARN_OK = True
@@ -25,7 +24,7 @@ with st.sidebar:
     peak_gap  = st.slider("ピーク間隔（px）", 2, 20, 6)
     min_area  = st.slider("最小粒面積（px）", 20, 600, 80, step=10)
     max_area  = st.slider("最大粒面積（px）", 300, 8000, 3000, step=50)
-    open_iter = st.slider("分離の強さ（開演算反復）", 0, 3, 1)
+    open_iter = st.slider("分離の強さ", 0, 3, 1)
     st.markdown("---")
     use_ml = st.checkbox(
         "軽量ML（ロジスティック回帰）を使う",
@@ -47,14 +46,14 @@ with c3:
     st.subheader("③ 判定対象")
     target_file = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"], key="target")
 
-# ---------------- 便利関数（JS→Python 移植） ----------------
+
 def read_bgr(uploaded):
     data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
     img  = cv2.imdecode(data, cv2.IMREAD_COLOR)
     return img
 
 def preprocess(img_bgr, bg_bright, th_offset, peak_min, peak_gap, min_area, max_area, open_iter):
-    """グレースケール→平坦化→平滑化→Otsu±offset→形態学→距離変換→局所ピーク→分水嶺→面積フィルタ"""
+    
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     gray = cv2.GaussianBlur(gray, (3,3), 0)
@@ -66,7 +65,7 @@ def preprocess(img_bgr, bg_bright, th_offset, peak_min, peak_gap, min_area, max_
     _, bw = cv2.threshold(gray, thr, 255, mode)
     bw = (bw > 0).astype(np.uint8)
 
-    # 開演算（くっつき防止）— HTML の erode→dilate→erode 相当
+    # 開演算
     k3 = np.ones((3,3), np.uint8)
     if open_iter > 0:
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k3, iterations=int(open_iter))
@@ -236,3 +235,4 @@ if judge_btn:
 # ---------------- 初期ヘルプ ----------------
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
