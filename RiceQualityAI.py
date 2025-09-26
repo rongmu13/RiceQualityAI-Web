@@ -1,94 +1,227 @@
-# RiceQualityAI.py
-import streamlit as st, numpy as np, pandas as pd, cv2
+import streamlit as st
+import numpy as np
+import pandas as pd
+import cv2
 from skimage import measure, segmentation, feature
+from sklearn.linear_model import LogisticRegression
 
 st.set_page_config(page_title="米品質判定AI", layout="wide")
 st.title("米品質判定AI")
+
+
 
 with st.sidebar:
     st.markdown("### 調整 → 学習 → 判定")
     bg_bright = st.checkbox("背景は明るい（白背景）", value=False)
     th_offset = st.slider("二値化オフセット", -40, 40, 0)
+    peak_min  = st.slider("ピーク感度（距離しきいの目安）", 2, 20, 5)
     peak_gap  = st.slider("ピーク間隔（px）", 2, 20, 6)
-    min_area  = st.slider("最小粒面積（px）", 20, 600, 80, 10)
-    max_area  = st.slider("最大粒面積（px）", 300, 8000, 3000, 50)
-    learn_btn = st.button("学習")
-    judge_btn = st.button("判定")
+    min_area  = st.slider("最小粒面積（px）", 20, 600, 80, step=10)
+    max_area  = st.slider("最大粒面積（px）", 300, 8000, 3000, step=50)
+    open_iter = st.slider("分離の強さ（開演算反復）", 0, 3, 1)
+    st.markdown("---")
+    use_ml = st.checkbox("軽量ML（ロジスティック回帰）を使う", value=False)
+    learn_btn = st.button("① 学習")
+    judge_btn = st.button("② 判定")
 
-up = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"])
 
-def read_img(f):
-    arr = np.asarray(bytearray(f.read()), dtype=np.uint8)
-    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+c1, c2, c3 = st.columns(3)
+with c1:
+    st.subheader("① 健康粒（参照）")
+    healthy_file = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"], key="healthy")
+with c2:
+    st.subheader("② 白未熟（参照）")
+    white_file = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"], key="white")
+with c3:
+    st.subheader("③ 判定対象")
+    target_file = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"], key="target")
 
-def segment(img, bg_bright, th_offset, peak_gap, min_area, max_area):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray); gray = cv2.GaussianBlur(gray,(3,3),0)
-    ret, _ = cv2.threshold(gray, 0,255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
-    thr = int(np.clip(ret + th_offset, 0,255))
+
+def read_bgr(uploaded):
+    data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
+    img  = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    return img
+
+def preprocess(img_bgr, bg_bright, th_offset, peak_min, peak_gap, min_area, max_area, open_iter):
+    """グレースケール→平坦化→平滑化→Otsu±offset→形態学(開演算)→距離変換→局所ピーク→分水嶺→面積フィルタ"""
+    h, w = img_bgr.shape[:2]
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+    gray = cv2.GaussianBlur(gray, (3,3), 0)
+
+    # Otsu
+    ret, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thr = int(np.clip(ret + th_offset, 0, 255))
     mode = cv2.THRESH_BINARY_INV if bg_bright else cv2.THRESH_BINARY
     _, bw = cv2.threshold(gray, thr, 255, mode)
-    bw = cv2.erode(bw, np.ones((3,3),np.uint8),1)
-    bw = cv2.dilate(bw, np.ones((3,3),np.uint8),2)
-    bw = cv2.erode(bw, np.ones((3,3),np.uint8),1)
-    dist = cv2.distanceTransform((bw>0).astype(np.uint8), cv2.DIST_L2, 5)
+    bw = (bw > 0).astype(np.uint8)
+
+    # 開演算で「くっつき」を剥がす（HTMLは erode→dilate→erode 相当）
+    k3 = np.ones((3,3), np.uint8)
+    if open_iter > 0:
+        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k3, iterations=int(open_iter))
+    else:
+        bw = cv2.erode(bw, k3, 1); bw = cv2.dilate(bw, k3, 2); bw = cv2.erode(bw, k3, 1)
+
+    # 距離変換 & 局所ピーク（min_distance = peak_gap）
+    dist = cv2.distanceTransform(bw, cv2.DIST_L2, 5)
     peaks = feature.peak_local_max(dist, min_distance=max(1,int(peak_gap)),
-                                   labels=(bw>0))
+                                   threshold_abs=float(peak_min), labels=bw)
+
+    # 兜底：ピークが少な過ぎ→緩めて再探索
+    if len(peaks) < 3:
+        peaks = feature.peak_local_max(dist, min_distance=max(1,int(max(1,peak_gap//2))), labels=bw)
+
+    # 分水嶺
     markers = np.zeros_like(bw, np.int32)
-    for i,(y,x) in enumerate(peaks,1): markers[y,x]=i
-    labels = segmentation.watershed(-dist, markers=markers, mask=(bw>0))
+    for i,(y,x) in enumerate(peaks,1):
+        markers[y,x] = i
+    if markers.max() == 0:
+        labels = measure.label(bw, connectivity=2)
+    else:
+        labels = segmentation.watershed(-dist, markers=markers, mask=bw)
+
+    
     comps = []
     for p in measure.regionprops(labels):
-        a=p.area
-        if a<min_area or a>max_area: continue
-        minr,minc,maxr,maxc = p.bbox
-        comps.append({"area":int(a),"bbox":(minc,minr,maxc,maxr),"coords":p.coords})
-    return bw, comps
+        a = int(p.area)
+        if a < min_area or a > max_area: 
+            continue
+        minr, minc, maxr, maxc = p.bbox
+        comps.append({
+            "area": a,
+            "bbox": (int(minc), int(minr), int(maxc), int(maxr)),
+            "coords": p.coords
+        })
+    return bw*255, comps  # bwは可視化用（0/255）
 
-def whiteness(img, comp):
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-    s = hsv[:,:,1]/255.0; v = hsv[:,:,2]/255.0
-    yy,xx = comp["coords"][:,0], comp["coords"][:,1]
-    vals = v[yy,xx] - 0.7*s[yy,xx]
+def whiteness_score(img_bgr, comp):
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    s = hsv[:,:,1] / 255.0
+    v = hsv[:,:,2] / 255.0
+    yy, xx = comp["coords"][:,0], comp["coords"][:,1]
+    vals = v[yy, xx] - 0.7 * s[yy, xx]
     return float(vals.mean()) if vals.size else 0.0
 
-def draw(img, comps, flags=None):
-    out = img.copy()
+def draw_boxes(img_bgr, comps, flags=None):
+    out = img_bgr.copy()
     for i,c in enumerate(comps):
         x1,y1,x2,y2 = c["bbox"]
-        col = (91,91,255) if (flags and flags[i]) else (53,211,57)
-        cv2.rectangle(out,(x1,y1),(x2,y2),col,2,cv2.LINE_AA)
+        if flags is None:
+            col = (106,161,255)  # blue
+        else:
+            col = (91,91,255) if flags[i] else (53,211,57)  # red / green
+        cv2.rectangle(out, (x1,y1), (x2,y2), col, 2, cv2.LINE_AA)
     return out
 
-if up:
-    img = read_img(up)
-    bw, comps = segment(img, bg_bright, th_offset, peak_gap, min_area, max_area)
-    col1,col2 = st.columns(2)
-    with col1: st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="原画像", use_container_width=True)
-    with col2: st.image(bw, caption="二値/分割（「一枠一粒」へ調整）", use_container_width=True)
 
-    # 学習
-    if learn_btn:
-        if not comps: st.warning("粒が検出されていません。"); 
-        else:
-            areas = np.array([c["area"] for c in comps])
-            st.session_state["th_area"] = float(np.quantile(areas, 0.2))
-            st.success(f"学習完了：面積しきい値 = {st.session_state['th_area']:.1f}")
+healthy = white = target = None
+h_img = w_img = t_img = None
+h_comps = w_comps = t_comps = []
 
-    # 判定
-    if judge_btn:
-        if "th_area" not in st.session_state: st.warning("先に「学習」を押してください。")
+if healthy_file:
+    h_img = read_bgr(healthy_file)
+    h_bw, h_comps = preprocess(h_img, bg_bright, th_offset, peak_min, peak_gap, min_area, max_area, open_iter)
+    st.image(cv2.cvtColor(draw_boxes(h_img, h_comps), cv2.COLOR_BGR2RGB),
+             caption=f"健康粒：{len(h_comps)} 粒を検出", use_container_width=True)
+
+if white_file:
+    w_img = read_bgr(white_file)
+    w_bw, w_comps = preprocess(w_img, bg_bright, th_offset, peak_min, peak_gap, min_area, max_area, open_iter)
+    st.image(cv2.cvtColor(draw_boxes(w_img, w_comps), cv2.COLOR_BGR2RGB),
+             caption=f"白未熟：{len(w_comps)} 粒を検出", use_container_width=True)
+
+if target_file:
+    t_img = read_bgr(target_file)
+    t_bw, t_comps = preprocess(t_img, bg_bright, th_offset, peak_min, peak_gap, min_area, max_area, open_iter)
+    st.image(cv2.cvtColor(draw_boxes(t_img, t_comps), cv2.COLOR_BGR2RGB),
+             caption=f"判定対象：{len(t_comps)} 粒を検出", use_container_width=True)
+
+
+def learn_threshold(h_img, h_comps, w_img, w_comps):
+    if not h_comps or not w_comps:
+        return None
+    hs = [whiteness_score(h_img, c) for c in h_comps]
+    ws = [whiteness_score(w_img, c) for c in w_comps]
+    th = float((np.median(hs) + np.median(ws)) / 2.0)
+    return th
+
+def learn_ml(h_img, h_comps, w_img, w_comps):
+    if not h_comps or not w_comps:
+        return None
+    X = []
+    y = []
+    for c in h_comps:
+        X.append([whiteness_score(h_img, c), float(c["area"])])
+        y.append(0)  # 健康
+    for c in w_comps:
+        X.append([whiteness_score(w_img, c), float(c["area"])])
+        y.append(1)  # 白未熟
+    if len(X) < 10:
+        return None
+    clf = LogisticRegression(max_iter=1000)
+    clf.fit(np.array(X), np.array(y))
+    return clf
+
+if learn_btn:
+    if h_img is None or w_img is None:
+        st.warning("①健康粒 と ②白未熟 の参照画像を先にアップロードしてください。")
+    else:
+        th = learn_threshold(h_img, h_comps, w_img, w_comps)
+        if th is None:
+            st.warning("参照画像から有効な粒を検出できませんでした。パラメータを調整して『一枠一粒』にしてください。")
         else:
-            th = st.session_state["th_area"]
-            flags = [c["area"]<th for c in comps]  # True=小粒（例：白未熟）
-            vis = draw(img, comps, flags)
-            total = len(flags); n_bad = int(np.sum(flags)); rate = 100*n_bad/total if total else 0
-            st.image(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB),
-                     caption=f"総数 {total}｜小粒(例:白未熟) {n_bad}｜割合 {rate:.1f}%",
-                     use_container_width=True)
-            df = pd.DataFrame({"id":np.arange(1,total+1),"area":[c['area'] for c in comps],
-                               "class":["白未熟" if f else "整粒" for f in flags]})
-            st.download_button("CSVダウンロード", data=df.to_csv(index=False).encode("utf-8-sig"),
-                               file_name="result.csv", mime="text/csv")
-else:
-    st.info("画像をアップロードし、左側のパラメータで「一枠一粒」に調整。完了後：「学習」→「判定」。")
+            st.session_state["threshold"] = th
+            msg = f"学習完了：しきい値 = {th:.4f}"
+            if use_ml:
+                clf = learn_ml(h_img, h_comps, w_img, w_comps)
+                if clf is not None:
+                    st.session_state["clf"] = clf
+                    msg += " ｜ ML=有効（ロジスティック回帰）"
+                else:
+                    st.session_state.pop("clf", None)
+                    msg += " ｜ ML=無効（参照粒が少なすぎ）"
+            st.success(msg)
+
+#判定
+if judge_btn:
+    if t_img is None or not t_comps:
+        st.warning("③判定対象 をアップロードし、『一枠一粒』になるよう調整してください。")
+    elif "threshold" not in st.session_state:
+        st.warning("先に ①学習 を実行してください。")
+    else:
+        th = float(st.session_state["threshold"])
+        clf = st.session_state.get("clf", None) if use_ml else None
+
+        scores = [whiteness_score(t_img, c) for c in t_comps]
+        if clf is not None:
+            Xtest = np.stack([scores, [float(c["area"]) for c in t_comps]], axis=1)
+            prob = clf.predict_proba(Xtest)[:,1]
+            is_white = prob >= 0.5
+        else:
+            is_white = np.array([s >= th for s in scores])
+
+        total = len(is_white)
+        n_white = int(np.sum(is_white))
+        rate = (100.0 * n_white / total) if total else 0.0
+
+        vis = draw_boxes(t_img, t_comps, flags=is_white.tolist())
+        st.image(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB),
+                 caption=f"結果：総数 {total}｜白未熟 {n_white}｜割合 {rate:.1f}%"
+                         + (" ｜ ML使用" if clf is not None else " ｜ しきい値使用"),
+                 use_container_width=True)
+
+        df = pd.DataFrame({
+            "id": np.arange(1, total+1, dtype=int),
+            "area": [int(c["area"]) for c in t_comps],
+            "score": [float(s) for s in scores],
+            "class": ["白未熟" if f else "整粒" for f in is_white]
+        })
+        st.dataframe(df, use_container_width=True)
+        st.download_button("CSVをダウンロード",
+                           data=df.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="result.csv", mime="text/csv")
+
+
+if not (healthy_file or white_file or target_file):
+    st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
