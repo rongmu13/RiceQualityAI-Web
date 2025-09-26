@@ -39,13 +39,13 @@ with st.sidebar:
 c1, c2, c3 = st.columns(3)
 with c1:
     st.subheader("① 健康粒（参照）")
-    healthy_file = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"], key="healthy")
+    healthy_file = st.file_uploader("画像をアップロード（JPG/PNG）・同条件で撮影した画像を使用してください", type=["jpg","jpeg","png"], key="healthy")
 with c2:
     st.subheader("② 白未熟（参照）")
-    white_file = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"], key="white")
+    white_file = st.file_uploader("画像をアップロード（JPG/PNG）・同条件で撮影した画像を使用してください", type=["jpg","jpeg","png"], key="white")
 with c3:
     st.subheader("③ 判定対象")
-    target_file = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"], key="target")
+    target_file = st.file_uploader("画像をアップロード（JPG/PNG）・同条件で撮影した画像を使用してください", type=["jpg","jpeg","png"], key="target")
 
 #共通函数
 def read_bgr(uploaded):
@@ -199,7 +199,7 @@ if judge_btn:
         )
 
         st.divider()
-        st.subheader("判定結果（拡大）")
+        st.subheader("判定結果")
         st.image(vis_big, width=W_RESULT,
                  caption=f"結果：総数 {total}｜白未熟 {n_white}｜割合 {rate:.1f}%"
                          + (" ｜ ML使用" if clf is not None else " ｜ しきい値使用"))
@@ -218,4 +218,5 @@ if judge_btn:
 #初期
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
