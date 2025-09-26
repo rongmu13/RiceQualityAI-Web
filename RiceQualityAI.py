@@ -29,11 +29,15 @@ with st.sidebar:
     max_area  = st.slider("最大粒面積（px）", 300, 8000, 3000, step=50)
     open_iter = st.slider("分離の強さ", 0, 3, 1)
     st.markdown("---")
-    use_ml = st.checkbox("軽量MLを使う",
-                         value=False, disabled=not SKLEARN_OK,
-                         help=None if SKLEARN_OK else "scikit-learnが無い環境なのでオフのまま使ってください")
-    learn_btn = st.button("① 学習")
-    judge_btn = st.button("② 判定")
+    ml_mode = st.selectbox(
+　　　  "学習方法",
+　　    ["しきい値のみ", "Logistic", "CNN"],
+  　　  index=0,
+  　　  help="参照画像から学習して分類。Logistic=線形分類、CNN=小型畳み込みネット"
+　　)
+　　learn_btn = st.button("① 学習")
+　　judge_btn = st.button("② 判定")
+
 
 #上传
 c1, c2, c3 = st.columns(3)
@@ -97,6 +101,73 @@ def whiteness_score(img_bgr, comp):
     vals = v[yy,xx] - 0.7*s[yy,xx]
     return float(vals.mean()) if vals.size else 0.0
 
+
+# ---------- 生成小贴图（用于 Logistic/CNN 的训练或推理） ----------
+def crop_patch(img_bgr, comp, size=48):
+    x1,y1,x2,y2 = comp["bbox"]
+    x1 = max(0, x1); y1 = max(0, y1)
+    x2 = min(img_bgr.shape[1]-1, x2); y2 = min(img_bgr.shape[0]-1, y2)
+    crop = img_bgr[y1:y2+1, x1:x2+1]
+    if crop.size == 0:  # 兜底
+        return np.zeros((size, size, 3), dtype=np.uint8)
+    return cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA)
+
+# ---------- CNN（Keras） ----------
+import tensorflow as tf
+
+def build_tiny_cnn(input_size=48):
+    m = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(input_size, input_size, 3)),
+        tf.keras.layers.Rescaling(1/255.0),
+        tf.keras.layers.Conv2D(16, 3, padding="same", activation="relu"),
+        tf.keras.layers.MaxPool2D(),
+        tf.keras.layers.Conv2D(32, 3, padding="same", activation="relu"),
+        tf.keras.layers.MaxPool2D(),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(64, activation="relu"),
+        tf.keras.layers.Dropout(0.3),
+        tf.keras.layers.Dense(1, activation="sigmoid")  # 1=白未熟
+    ])
+    m.compile(optimizer=tf.keras.optimizers.Adam(1e-3),
+              loss="binary_crossentropy", metrics=["accuracy"])
+    return m
+
+def train_cnn(h_img, h_comps, w_img, w_comps, input_size=48, max_per_class=400, epochs=10, batch=32):
+    # 采样（均衡）
+    H = h_comps[:max_per_class] if len(h_comps) > max_per_class else h_comps
+    W = w_comps[:max_per_class] if len(w_comps) > max_per_class else w_comps
+    n = min(len(H), len(W))
+    if n < 10:
+        return None, "参照の粒子が少なすぎます（各10+推奨）"
+
+    xs, ys = [], []
+    for i in range(n):
+        xs.append(crop_patch(h_img, H[i], input_size)); ys.append(0)  # 健康=0
+        xs.append(crop_patch(w_img, W[i], input_size)); ys.append(1)  # 白未熟=1
+    X = np.asarray(xs, dtype=np.uint8)
+    y = np.asarray(ys, dtype=np.float32)
+
+    # 打乱
+    idx = np.arange(len(y))
+    np.random.shuffle(idx)
+    X, y = X[idx], y[idx]
+
+    model = build_tiny_cnn(input_size)
+    h = model.fit(X, y, epochs=epochs, batch_size=batch, validation_split=0.15, verbose=0)
+    va = float(h.history["val_accuracy"][-1])
+    return model, f"CNN学習完了：val acc={va*100:.1f}%"
+
+def cnn_predict(model, img_bgr, comps, input_size=48):
+    probs = []
+    for c in comps:
+        patch = crop_patch(img_bgr, c, input_size)
+        p = float(model.predict(patch[None, ...], verbose=0)[0][0])  # 0..1
+        probs.append(p)
+    return np.array(probs)
+
+
+
+
 def draw_boxes(img_bgr, comps, flags=None):
     out = img_bgr.copy()
     for i,c in enumerate(comps):
@@ -158,19 +229,47 @@ if learn_btn:
     if h_img is None or w_img is None:
         st.warning("①健康粒 と ②白未熟 の参照画像を先にアップロードしてください。")
     else:
+        # 阈值法：始终学习
         th = learn_threshold(h_img, h_comps, w_img, w_comps)
         if th is None:
             st.warning("参照画像から有効な粒を検出できませんでした。『一枠一粒』に調整してください。")
         else:
-            st.session_state["threshold"] = th
+            st.session_state["threshold"] = float(th)
             msg = f"学習完了：しきい値 = {th:.4f}"
-            if use_ml and SKLEARN_OK:
-                clf = learn_ml(h_img, h_comps, w_img, w_comps)
-                if clf is not None:
-                    st.session_state["clf"] = clf; msg += " ｜ ML=有効"
+
+            # ML 任选其一
+            if ml_mode == "Logistic":
+                try:
+                    from sklearn.linear_model import LogisticRegression
+                    clf = learn_ml(h_img, h_comps, w_img, w_comps)
+                    if clf is not None:
+                        st.session_state["clf"] = clf
+                        st.session_state.pop("cnn", None)
+                        msg += " ｜ ML=Logistic 有効"
+                    else:
+                        st.session_state.pop("clf", None)
+                        msg += " ｜ ML=Logistic 無効（参照粒が少ない）"
+                except Exception:
+                    st.session_state.pop("clf", None)
+                    msg += " ｜ ML=Logistic 使用不可（環境）"
+
+            elif ml_mode == "CNN":
+                model, note = train_cnn(h_img, h_comps, w_img, w_comps, input_size=48, epochs=10)
+                if model is not None:
+                    st.session_state["cnn"] = model
+                    st.session_state.pop("clf", None)
+                    msg += " ｜ ML=CNN 有効"
                 else:
-                    st.session_state.pop("clf", None); msg += " ｜ ML=無効（参照粒が少ない）"
+                    st.session_state.pop("cnn", None)
+                    msg += " ｜ ML=CNN 無効（参照粒が少ない）"
+                st.info(note)
+
+            else:  # しきい値のみ
+                st.session_state.pop("clf", None)
+                st.session_state.pop("cnn", None)
+
             st.success(msg)
+
 
 #判定
 if judge_btn:
@@ -180,17 +279,24 @@ if judge_btn:
         st.warning("先に ①学習 を実行してください。")
     else:
         th = float(st.session_state["threshold"])
-        clf = st.session_state.get("clf", None) if (use_ml and SKLEARN_OK) else None
-
-        scores = [whiteness_score(t_img, c) for c in t_comps]
-        if clf is not None:
+        # 优先使用 CNN，其次 Logistic，否则阈值
+        if "cnn" in st.session_state and st.session_state["cnn"] is not None and ml_mode == "CNN":
+            probs = cnn_predict(st.session_state["cnn"], t_img, t_comps, input_size=48)
+            is_white = probs >= 0.5
+            used = "CNN"
+        elif "clf" in st.session_state and st.session_state["clf"] is not None and ml_mode == "Logistic":
+            scores = [whiteness_score(t_img, c) for c in t_comps]
             Xtest = np.stack([scores, [float(c["area"]) for c in t_comps]], axis=1)
-            prob = clf.predict_proba(Xtest)[:,1]
+            prob = st.session_state["clf"].predict_proba(Xtest)[:,1]
             is_white = prob >= 0.5
+            used = "Logistic"
         else:
+            scores = [whiteness_score(t_img, c) for c in t_comps]
             is_white = np.array([s >= th for s in scores])
+            used = "しきい値"
 
-        total = len(is_white); n_white = int(np.sum(is_white))
+        total = len(is_white)
+        n_white = int(np.sum(is_white))
         rate = (100.0 * n_white / total) if total else 0.0
 
         vis_big = cv2.cvtColor(
@@ -199,15 +305,16 @@ if judge_btn:
         )
 
         st.divider()
-        st.subheader("判定結果")
-        st.image(vis_big, width=W_RESULT,
-                 caption=f"結果：総数 {total}｜白未熟 {n_white}｜割合 {rate:.1f}%"
-                         + (" ｜ ML使用" if clf is not None else " ｜ しきい値使用"))
+        st.subheader("判定結果（拡大）")
+        st.image(vis_big, width=900,
+                 caption=f"結果：総数 {total}｜白未熟 {n_white}｜割合 {rate:.1f}% ｜ ML={used}")
 
+        # 导出
+        out_scores = (probs if used=="CNN" else (prob if used=="Logistic" else scores))
         df = pd.DataFrame({
             "id": np.arange(1, total+1, dtype=int),
-            "area": [int(c["area"]) for c in t_comps],
-            "score": [float(s) for s in scores],
+            "area": [int(c['area']) for c in t_comps],
+            "score": [float(s) for s in out_scores],
             "class": ["白未熟" if f else "整粒" for f in is_white]
         })
         st.dataframe(df, use_container_width=True)
@@ -215,9 +322,11 @@ if judge_btn:
                            data=df.to_csv(index=False).encode("utf-8-sig"),
                            file_name="result.csv", mime="text/csv")
 
+
 #初期
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
 
 
