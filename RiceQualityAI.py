@@ -157,7 +157,7 @@ def train_cnn(h_img, h_comps, w_img, w_comps, input_size=48, max_per_class=400, 
     model = build_tiny_cnn(input_size)
     h = model.fit(X, y, epochs=epochs, batch_size=batch, validation_split=0.15, verbose=0)
     va = float(h.history["val_accuracy"][-1])
-    return model, f"CNN学習完了：val acc={va*100:.1f}%"
+    return model, f"CNN学習完了：Validation accuracy={va*100:.1f}%"
 
 def cnn_predict(model, img_bgr, comps, input_size=48):
     probs = []
@@ -328,6 +328,7 @@ if judge_btn:
 #初期
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
 
 
