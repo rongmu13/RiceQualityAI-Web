@@ -1,4 +1,4 @@
-# app.py（日本語UI版）
+# app.py
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -175,3 +175,4 @@ if judge_btn:
 
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで「一枠一粒」の状態に調整してください。完了後：①学習 → ②判定。")
+
