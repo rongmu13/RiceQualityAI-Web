@@ -18,7 +18,7 @@ st.title("米品質判定AI")
 #使い方ガイド
 with st.expander("📖 使い方ガイド", expanded=False):
     st.markdown("""
-**目的**：青い枠 1 つに米粒が **ちょうど 1 粒** 入る見え方にする。
+**目的**：青い枠ひとつに米粒がちょうど一粒収まるように調整する。
 
 **おすすめ順：**  
 1）背景を正しく設定 →  
@@ -402,6 +402,7 @@ if judge_btn:
 #初期
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
 
 
