@@ -29,14 +29,16 @@ with st.sidebar:
     max_area  = st.slider("最大粒面積（px）", 300, 8000, 3000, step=50)
     open_iter = st.slider("分離の強さ", 0, 3, 1)
     st.markdown("---")
+
     ml_mode = st.selectbox(
-       "学習方法",
-       ["しきい値のみ", "Logistic", "CNN"],
-       index=0,
-       help="参照画像から学習して分類。Logistic=線形分類、CNN=小型畳み込みネット"
+        "学習方法",
+        ["しきい値のみ", "Logistic", "CNN"],
+        index=0,
+        help="参照画像から学習して分類。Logistic=線形分類、CNN=小型畳み込みネット"
     )
     learn_btn = st.button("① 学習")
     judge_btn = st.button("② 判定")
+
 
 
 #上传
@@ -326,6 +328,7 @@ if judge_btn:
 #初期
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
 
 
