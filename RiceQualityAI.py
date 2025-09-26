@@ -315,7 +315,7 @@ def learn_ml(h_img, h_comps, w_img, w_comps):
     clf.fit(Xtr, ytr)
 
     acc = accuracy_score(yva, clf.predict(Xva))
-    return clf, f"Logistic学習完了：val acc={acc*100:.1f}%"
+    return clf, f"Logistic学習完了：Validation accuracy={acc*100:.1f}%"
 
 
 if learn_btn:
@@ -420,6 +420,7 @@ if judge_btn:
 #初期
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
 
 
