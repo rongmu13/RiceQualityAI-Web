@@ -291,15 +291,32 @@ def learn_threshold(h_img, h_comps, w_img, w_comps):
     ws = [whiteness_score(w_img, c) for c in w_comps]
     return float((np.median(hs) + np.median(ws)) / 2.0)
 
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.linear_model import LogisticRegression
+
 def learn_ml(h_img, h_comps, w_img, w_comps):
-    if (not SKLEARN_OK) or (LogisticRegression is None): return None
-    if not h_comps or not w_comps: return None
+    if not h_comps or not w_comps:
+        return None, "参照粒が不足"
+
     X, y = [], []
-    for c in h_comps: X.append([whiteness_score(h_img, c), float(c["area"])]); y.append(0)
-    for c in w_comps: X.append([whiteness_score(w_img, c), float(c["area"])]); y.append(1)
-    if len(X) < 10: return None
-    clf = LogisticRegression(max_iter=1000).fit(np.array(X), np.array(y))
-    return clf
+    for c in h_comps:
+        X.append([whiteness_score(h_img, c), float(c["area"])])
+        y.append(0)
+    for c in w_comps:
+        X.append([whiteness_score(w_img, c), float(c["area"])])
+        y.append(1)
+    if len(X) < 10:
+        return None, "参照粒が少なすぎます"
+
+    # 8:2 拆分训练/验证
+    Xtr, Xva, ytr, yva = train_test_split(X, y, test_size=0.2, random_state=42)
+    clf = LogisticRegression(max_iter=1000)
+    clf.fit(Xtr, ytr)
+
+    acc = accuracy_score(yva, clf.predict(Xva))
+    return clf, f"Logistic学習完了：val acc={acc*100:.1f}%"
+
 
 if learn_btn:
     if h_img is None or w_img is None:
@@ -320,7 +337,7 @@ if learn_btn:
                     if clf is not None:
                         st.session_state["clf"] = clf
                         st.session_state.pop("cnn", None)
-                        msg += " ｜ " + note   # 这里会包含 val acc=xx%
+                        msg += " ｜ " + note   
                     else:
                         st.session_state.pop("clf", None)
                         msg += " ｜ ML=Logistic 無効"
@@ -403,6 +420,7 @@ if judge_btn:
 #初期
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
 
 
