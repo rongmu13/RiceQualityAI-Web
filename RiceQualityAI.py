@@ -316,18 +316,19 @@ if learn_btn:
             # ML 任选其一
             if ml_mode == "Logistic":
                 try:
-                    from sklearn.linear_model import LogisticRegression
-                    clf = learn_ml(h_img, h_comps, w_img, w_comps)
+                    clf, note = learn_ml(h_img, h_comps, w_img, w_comps)
                     if clf is not None:
                         st.session_state["clf"] = clf
                         st.session_state.pop("cnn", None)
-                        msg += " ｜ ML=Logistic 有効"
+                        msg += " ｜ " + note   # 这里会包含 val acc=xx%
                     else:
                         st.session_state.pop("clf", None)
-                        msg += " ｜ ML=Logistic 無効（参照粒が少ない）"
+                        msg += " ｜ ML=Logistic 無効"
                 except Exception:
                     st.session_state.pop("clf", None)
                     msg += " ｜ ML=Logistic 使用不可（環境）"
+
+                    
 
             elif ml_mode == "CNN":
                 model, note = train_cnn(h_img, h_comps, w_img, w_comps, input_size=48, epochs=10)
@@ -402,6 +403,7 @@ if judge_btn:
 #初期
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
 
 
