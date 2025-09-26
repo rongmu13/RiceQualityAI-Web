@@ -124,19 +124,33 @@ if healthy_file:
     h_bw, h_comps = preprocess(h_img, bg_bright, th_offset, peak_min, peak_gap, min_area, max_area, open_iter)
     col1, col2 = st.columns(2)
 
-with col1:
+# ---- 上面两张图并排显示 ----
+row1_col1, row1_col2 = st.columns(2)
+
+with row1_col1:
     if h_img is not None:
-        st.image(cv2.cvtColor(draw_boxes(h_img, h_comps), cv2.COLOR_BGR2RGB),
-                 caption=f"健康粒：{len(h_comps)} 粒", width=400)
+        st.image(
+            cv2.cvtColor(draw_boxes(h_img, h_comps), cv2.COLOR_BGR2RGB),
+            caption=f"健康粒：{len(h_comps)} 粒",
+            width=400
+        )
 
-with col2:
+with row1_col2:
     if w_img is not None:
-        st.image(cv2.cvtColor(draw_boxes(w_img, w_comps), cv2.COLOR_BGR2RGB),
-                 caption=f"白未熟：{len(w_comps)} 粒", width=400)
+        st.image(
+            cv2.cvtColor(draw_boxes(w_img, w_comps), cv2.COLOR_BGR2RGB),
+            caption=f"白未熟：{len(w_comps)} 粒",
+            width=400
+        )
 
+# ---- 判定対象单独一行 ----
 if t_img is not None:
-    st.image(cv2.cvtColor(draw_boxes(t_img, t_comps), cv2.COLOR_BGR2RGB),
-             caption=f"判定対象：{len(t_comps)} 粒", width=600)
+    st.image(
+        cv2.cvtColor(draw_boxes(t_img, t_comps), cv2.COLOR_BGR2RGB),
+        caption=f"判定対象：{len(t_comps)} 粒",
+        width=600
+    )
+
 
 
 if white_file:
@@ -239,4 +253,5 @@ if judge_btn:
 
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
