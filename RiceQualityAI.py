@@ -16,9 +16,9 @@ except Exception:
 st.set_page_config(page_title="米品質判定AI", layout="wide")
 st.title("米品質判定AI")
 
-# 固定显示宽度（你可改数字微调）
-W_COL = 360   # 三列下的图宽
-W_TGT = 360   # 判定结果图宽（同列）
+# ===== 统一控制显示尺寸 =====
+W_COL    = 360   # 第一行三列下的预览图（健康/白未熟/判定前）
+W_RESULT = 900   # 第二行“判定結果（拡大）”
 
 # -------- サイドバー --------
 with st.sidebar:
@@ -49,7 +49,7 @@ with c3:
     st.subheader("③ 判定対象")
     target_file = st.file_uploader("画像をアップロード（JPG/PNG）", type=["jpg","jpeg","png"], key="target")
 
-# -------- 共通関数（JS→Python移植） --------
+# -------- 共通関数 --------
 def read_bgr(uploaded):
     data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
@@ -123,7 +123,7 @@ if target_file:
     t_img = read_bgr(target_file)
     _, t_comps = preprocess(t_img, bg_bright, th_offset, peak_min, peak_gap, min_area, max_area, open_iter)
 
-# -------- 各アップローダの真下に表示（同じ列） --------
+# -------- 第一行：各アップローダの下に小さめ表示（判定前）--------
 with c1:
     if h_img is not None:
         st.image(cv2.cvtColor(draw_boxes(h_img, h_comps), cv2.COLOR_BGR2RGB),
@@ -174,7 +174,7 @@ if learn_btn:
                     st.session_state.pop("clf", None); msg += " ｜ ML=無効（参照粒が少ない）"
             st.success(msg)
 
-# -------- 判定（結果も第3列の下に表示） --------
+# -------- 判定：第二行で拡大表示 --------
 if judge_btn:
     if t_img is None or not t_comps:
         st.warning("③判定対象 をアップロードし、『一枠一粒』に調整してください。")
@@ -195,11 +195,16 @@ if judge_btn:
         total = len(is_white); n_white = int(np.sum(is_white))
         rate = (100.0 * n_white / total) if total else 0.0
 
-        vis = cv2.cvtColor(draw_boxes(t_img, t_comps, flags=is_white.tolist()), cv2.COLOR_BGR2RGB)
-        with c3:
-            st.image(vis, caption=f"結果：総数 {total}｜白未熟 {n_white}｜割合 {rate:.1f}%"
-                                  + (" ｜ ML使用" if clf is not None else " ｜ しきい値使用"),
-                     width=W_TGT)
+        vis_big = cv2.cvtColor(
+            draw_boxes(t_img, t_comps, flags=is_white.tolist()),
+            cv2.COLOR_BGR2RGB
+        )
+
+        st.divider()
+        st.subheader("判定結果（拡大）")
+        st.image(vis_big, width=W_RESULT,
+                 caption=f"結果：総数 {total}｜白未熟 {n_white}｜割合 {rate:.1f}%"
+                         + (" ｜ ML使用" if clf is not None else " ｜ しきい値使用"))
 
         df = pd.DataFrame({
             "id": np.arange(1, total+1, dtype=int),
