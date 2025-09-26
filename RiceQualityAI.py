@@ -12,7 +12,7 @@ except Exception:
     SKLEARN_OK = False
 
 st.set_page_config(page_title="米品質判定AI.Shinshu-U R.Y.", layout="wide")
-st.title("米品質判定AI")
+st.title("米品質判定AI　Shinshu Univ. R.Y.")
 
 
 #使い方ガイド
@@ -402,6 +402,7 @@ if judge_btn:
 #初期
 if not (healthy_file or white_file or target_file):
     st.info("画像をアップロードし、左側のパラメータで『一枠一粒』に調整。完了後：①学習 → ②判定。")
+
 
 
 
